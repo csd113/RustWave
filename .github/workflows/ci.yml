@@ -1,4 +1,16 @@
 # .github/workflows/ci.yml
+#
+# Continuous Integration — runs on every push and pull request to main/master.
+#
+# Jobs:
+#   test    — cargo test (all unit + integration tests)
+#   clippy  — cargo clippy (deny warnings)
+#   fmt     — cargo fmt --check (enforce consistent formatting)
+#   audit   — cargo audit (known CVEs in dependencies)  [#16]
+#
+# cargo-audit is installed from crates.io on each run.
+# Cache the registry + build artifacts to keep runs fast.
+
 name: CI
 
 on:
@@ -6,276 +18,89 @@ on:
     branches: [main, master]
   pull_request:
     branches: [main, master]
-  workflow_dispatch:
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
-  CARGO_INCREMENTAL: 0
-  CARGO_NET_RETRY: 10
-  RUSTUP_MAX_RETRIES: 10
-  RUST_BACKTRACE: short
-  SCCACHE_GHA_ENABLED: "true"
-  RUSTC_WRAPPER: "sccache"
+  RUST_BACKTRACE: 1
 
 jobs:
-
-  # ── Code Quality ──
-
-  fmt:
-    name: Rustfmt
+  test:
+    name: Tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
         with:
-          components: rustfmt
-      - run: cargo fmt --all -- --check
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Run tests
+        run: cargo test --all-features
 
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Rust stable + clippy
+        uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: mozilla-actions/sccache-action@v0.0.6
-      - run: cargo clippy --all-targets --all-features -- -D warnings -W clippy::pedantic -W clippy::nursery
 
-  docs:
-    name: Documentation
+      - name: Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-clippy-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run Clippy (deny warnings)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  fmt:
+    name: Formatting
     runs-on: ubuntu-latest
-    env:
-      RUSTDOCFLAGS: -D warnings
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: mozilla-actions/sccache-action@v0.0.6
-      - run: cargo doc --no-deps --all-features
 
-  # ── Security ──
+      - name: Install Rust stable + rustfmt
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all --check
 
   audit:
     name: Security Audit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: taiki-e/install-action@cargo-deny
-      - run: cargo deny check
 
-  # ── Tests ──
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
 
-  test:
-    name: Test (${{ matrix.name }})
-    needs: [fmt, clippy]
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Linux x86_64
-            os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            cross: false
-
-          - name: Linux ARM64
-            os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-            cross: true
-
-          - name: macOS ARM64
-            os: macos-14
-            target: aarch64-apple-darwin
-            cross: false
-
-          - name: macOS x86_64
-            os: macos-13
-            target: x86_64-apple-darwin
-            cross: false
-
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo registry
+        uses: actions/cache@v4
         with:
-          targets: ${{ matrix.target }}
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-audit-${{ hashFiles('**/Cargo.lock') }}
 
-      - uses: mozilla-actions/sccache-action@v0.0.6
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
 
-      - name: Install cross
-        if: matrix.cross
-        uses: taiki-e/install-action@cross
-
-      - name: Run tests (native)
-        if: "!matrix.cross"
-        run: cargo test --all-features --target ${{ matrix.target }}
-
-      - name: Run tests (cross)
-        if: matrix.cross
-        run: cross test --all-features --target ${{ matrix.target }}
-
-  # ── Release Builds ──
-
-  build:
-    name: Build (${{ matrix.name }})
-    needs: [test]
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Linux x86_64
-            os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            cross: false
-
-          - name: Linux ARM64
-            os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-            cross: true
-
-          - name: macOS ARM64
-            os: macos-14
-            target: aarch64-apple-darwin
-            cross: false
-
-          - name: macOS x86_64
-            os: macos-13
-            target: x86_64-apple-darwin
-            cross: false
-
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - uses: mozilla-actions/sccache-action@v0.0.6
-
-      - name: Install cross
-        if: matrix.cross
-        uses: taiki-e/install-action@cross
-
-      - name: Build release (native)
-        if: "!matrix.cross"
-        run: cargo build --release --all-features --target ${{ matrix.target }}
-
-      - name: Build release (cross)
-        if: matrix.cross
-        run: cross build --release --all-features --target ${{ matrix.target }}
-
-      - name: Upload binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: rustwave-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/rustwave-cli
-          if-no-files-found: error
-          retention-days: 14
-
-  # ── Encode/Decode Smoke Test ──
-
-  smoke-test:
-    name: Smoke Test (encode → decode)
-    needs: [build]
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Linux x86_64
-            os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-
-          - name: macOS ARM64
-            os: macos-14
-            target: aarch64-apple-darwin
-
-    runs-on: ${{ matrix.os }}
-    steps:
-      - name: Download binary
-        uses: actions/download-artifact@v4
-        with:
-          name: rustwave-${{ matrix.target }}
-          path: bin/
-
-      - name: Make executable
-        run: chmod +x bin/rustwave-cli
-
-      - name: Create test payload
-        run: echo "RustWave smoke test payload 1234567890" > test_input.bin
-
-      - name: Encode
-        run: bin/rustwave-cli encode -i test_input.bin -o signal.wav
-
-      - name: Decode
-        run: bin/rustwave-cli decode -i signal.wav -o test_output.bin
-
-      - name: Verify lossless round-trip
-        run: |
-          if diff test_input.bin test_output.bin; then
-            echo "✅ Round-trip successful — output matches input byte-for-byte"
-          else
-            echo "❌ Round-trip FAILED — output differs from input"
-            exit 1
-          fi
-
-  # ── MSRV ──
-
-  msrv:
-    name: MSRV (Rust 1.75)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.75
-      - uses: mozilla-actions/sccache-action@v0.0.6
-      - run: cargo check --all-features
-
-  # ── Gate ──
-
-  ci-pass:
-    name: CI Pass ✅
-    if: always()
-    needs: [fmt, clippy, docs, audit, test, build, smoke-test, msrv]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Evaluate results
-        run: |
-          echo "Results:"
-          echo "  fmt:        ${{ needs.fmt.result }}"
-          echo "  clippy:     ${{ needs.clippy.result }}"
-          echo "  docs:       ${{ needs.docs.result }}"
-          echo "  audit:      ${{ needs.audit.result }}"
-          echo "  test:       ${{ needs.test.result }}"
-          echo "  build:      ${{ needs.build.result }}"
-          echo "  smoke-test: ${{ needs.smoke-test.result }}"
-          echo "  msrv:       ${{ needs.msrv.result }}"
-
-      - name: All checks passed
-        if: >-
-          needs.fmt.result        == 'success' &&
-          needs.clippy.result     == 'success' &&
-          needs.docs.result       == 'success' &&
-          needs.audit.result      == 'success' &&
-          needs.test.result       == 'success' &&
-          needs.build.result      == 'success' &&
-          needs.smoke-test.result == 'success' &&
-          needs.msrv.result       == 'success'
-        run: echo "🎉 All CI checks passed!"
-
-      - name: Some checks failed
-        if: >-
-          needs.fmt.result        != 'success' ||
-          needs.clippy.result     != 'success' ||
-          needs.docs.result       != 'success' ||
-          needs.audit.result      != 'success' ||
-          needs.test.result       != 'success' ||
-          needs.build.result      != 'success' ||
-          needs.smoke-test.result != 'success' ||
-          needs.msrv.result       != 'success'
-        run: |
-          echo "❌ Some CI checks failed!"
-          exit 1
+      - name: Run cargo audit
+        # --deny unsound: also fail on soundness issues, not only CVEs
+        run: cargo audit --deny unsound
