@@ -1,0 +1,49 @@
+CHangelog
+
+## Dev
+
+decoder.rs
+#	What	Why
+1	Removed Clone bound; pass on_progress by &impl Fn(f32)	Eliminates closure cloning on every phase-offset iteration
+2	SYNC_BITS → compile-time const [bool; 16]	Eliminates Vec<bool> heap allocation on every call to find_frame_in_bits
+3	is_multiple_of(32) → % 32 == 0	is_multiple_of only stabilized in Rust 1.85; modulo is universally supported
+4	Pass precomputed spb into samples_to_bits	Avoids redundant f64::from / f64::from division
+5	Vec::with_capacity(estimated)	Pre-allocates the bit vector; avoids repeated reallocation during decode
+6	Precompute cos_w / sin_w once in goertzel	Saves two redundant trig calls per invocation (called 2× per bit)
+7	x.mul_add(1.0, y) → x + y	mul_add with multiplier 1.0 is a no-op identity; clearer without it
+8	loop + manual counter → for idx in 0usize..	More idiomatic;
+
+encoder.rs
+#	What	Why
+1	Removed intermediate Vec<bool>; iterate &byte → bit shifts directly	Eliminates heap allocation of framed.len() * 8 bools
+2	Precompute mark_inc / space_inc outside the loop	Avoids a multiply + divide per bit (× thousands of bits)
+3	silence_len now uses .round() before cast	Consistent with every other float→usize conversion in the codebase
+4	Removed misleading .max(1) on total_bits	Division only reachable inside the loop, which is skipped when total_bits == 0
+
+framer.rs
+#	What	Why
+1	Added #[derive(Debug, Clone, PartialEq, Eq)] to Decoded	Enables idiomatic test assertions, logging, and downstream use
+2	CRC bit-by-bit loop → compile-time CRC16_TABLE + single XOR/lookup per byte	~8× fewer branches per byte; table lives in .rodata at zero runtime cost
+3	Removed dead .get(..name_len).unwrap_or(name_bytes) → &name_bytes[..name_len]	name_len ≤ name_bytes.len() is invariant; dead fallback removed
+4	u16::try_from(name_len).unwrap_or(255) → name_len as u16	name_len ≤ 255 by construction; try_from cannot fail, fallback was misleading
+5	u32::try_from(data.len()).unwrap_or(u32::MAX) → assert! + direct cast	Silent wrong-length write corrupts frames; now panics with clear message
+6	Added clippy::cast_possible_truncation to deframe allows	u32 as usize can truncate on 16-bit targets; suppresses Clippy false positive
+
+gui.rs
+#	What	Why
+1	UTF-8 safe truncation via char_indices().nth()	Byte-offset indexing panics when detail contains multi-byte characters (common in file paths)
+2	Extract only the path from dropped_files inside ctx.input()	Avoids cloning the entire Vec<DroppedFile> (including PathBufs and byte buffers) on every single frame
+3	Pass filename clone to thread instead of recomputing orig_name	Eliminates redundant file_name().to_string_lossy().into_owned() inside the worker
+4	detail.to_string() → detail.to_owned()	Clippy str_to_string — to_owned() is idiomatic for &str → String
+
+main.rs
+#	What	Why
+1	Gui is now a proper clap Subcommand	Visible in --help, validated by clap, cannot accidentally match as a value to another flag
+2	Extracted run() → Result<(), String> with ? propagation	Single process::exit in main; destructors run on error paths; removes 5 scattered process::exit(1) closures
+3	Removed manual std::env::args().any(...) scan	No longer needed; eliminates gratuitous String allocation per arg every launch
+
+wav.rs
+#	What	Why
+1	Guard channels == 0 before step_by()	step_by(0) panics unconditionally — a malformed WAV would crash the process
+2	spec.channels as usize → usize::from(spec.channels)	Satisfies Clippy cast_lossless — u16 → usize has a lossless From impl
+3	Added TempFile drop guard in tests	Temp files are now cleaned up even when assertions fail or the test panics

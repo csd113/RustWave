@@ -6,16 +6,33 @@
 ///                 ◄──────────────────── CRC covers this span ──────────────────────►
 use crate::config::{PREAMBLE_LEN, SYNC};
 
+/// Decoded frame: original filename and payload bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Decoded {
+    pub filename: String,
+    pub data: Vec<u8>,
+}
+
 /// Wrap `data` in a transmittable frame, embedding `filename` so the decoder
 /// can reconstruct the file with the correct name and extension.
+///
+/// # Panics
+///
+/// Panics if `data.len()` exceeds `u32::MAX` (≈ 4 GiB).
 #[allow(
-    clippy::arithmetic_side_effects, // capacity arithmetic is safe; values are small by construction
-    clippy::indexing_slicing,        // out[PREAMBLE_LEN..] is valid: preamble bytes are always pushed first
+    clippy::arithmetic_side_effects,  // capacity arithmetic is safe; values are small by construction
+    clippy::cast_possible_truncation, // name_len ≤ 255, data.len ≤ u32::MAX — guarded above each cast
+    clippy::indexing_slicing,         // out[PREAMBLE_LEN..] is valid: preamble bytes are always pushed first
 )]
 pub fn frame(data: &[u8], filename: &str) -> Vec<u8> {
     let name_bytes = filename.as_bytes();
     let name_len = name_bytes.len().min(255); // cap at 255 bytes
-    let name_bytes = name_bytes.get(..name_len).unwrap_or(name_bytes);
+    let name_bytes = &name_bytes[..name_len];
+
+    assert!(
+        u32::try_from(data.len()).is_ok(),
+        "payload exceeds maximum frame size (u32::MAX bytes)"
+    );
 
     let capacity = PREAMBLE_LEN + 2 + 2 + name_len + 4 + data.len() + 2;
     let mut out = Vec::with_capacity(capacity);
@@ -26,12 +43,12 @@ pub fn frame(data: &[u8], filename: &str) -> Vec<u8> {
     // Sync word
     out.extend_from_slice(&SYNC);
 
-    // Filename length (u16 LE) + filename bytes
-    out.extend_from_slice(&u16::try_from(name_len).unwrap_or(255).to_le_bytes());
+    // Filename length (u16 LE) + filename bytes — name_len ≤ 255 so cast is lossless
+    out.extend_from_slice(&(name_len as u16).to_le_bytes());
     out.extend_from_slice(name_bytes);
 
-    // Payload length (u32 LE) + payload
-    out.extend_from_slice(&u32::try_from(data.len()).unwrap_or(u32::MAX).to_le_bytes());
+    // Payload length (u32 LE) + payload — assert above guarantees cast is lossless
+    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
     out.extend_from_slice(data);
 
     // CRC-16/CCITT over everything from sync word onwards (not the preamble)
@@ -41,20 +58,15 @@ pub fn frame(data: &[u8], filename: &str) -> Vec<u8> {
     out
 }
 
-/// Decoded frame: original filename and payload bytes.
-pub struct Decoded {
-    pub filename: String,
-    pub data: Vec<u8>,
-}
-
 /// Find and validate a frame inside `raw`, returning the embedded filename and payload.
 ///
 /// Used only by the byte-level path (tests / CLI verification).
 /// The audio decoder uses `find_frame_in_bits` in decoder.rs directly.
 #[allow(
     dead_code,
-    clippy::arithmetic_side_effects, // cursor arithmetic is bounds-checked before each use
-    clippy::indexing_slicing,        // all slices are bounds-checked immediately above each access
+    clippy::arithmetic_side_effects,  // cursor arithmetic is bounds-checked before each use
+    clippy::cast_possible_truncation, // u32 as usize: payload_len is bounds-checked before use
+    clippy::indexing_slicing,         // all slices are bounds-checked immediately above each access
 )]
 pub fn deframe(raw: &[u8]) -> Result<Decoded, String> {
     let sync_pos = raw
@@ -127,18 +139,44 @@ pub fn deframe(raw: &[u8]) -> Result<Decoded, String> {
 // CRC-16/CCITT  (polynomial 0x1021, init 0xFFFF, no bit-reflection)
 // ---------------------------------------------------------------------------
 
-#[allow(clippy::arithmetic_side_effects)] // bit-shifting in CRC polynomial; no panic risk
-pub fn crc16(data: &[u8]) -> u16 {
-    let mut crc: u16 = 0xFFFF;
-    for &byte in data {
-        crc ^= u16::from(byte) << 8;
-        for _ in 0..8 {
+/// Pre-computed CRC-16/CCITT lookup table (polynomial 0x1021).
+#[allow(
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::indexing_slicing
+)]
+const CRC16_TABLE: [u16; 256] = {
+    let mut table = [0u16; 256];
+    let mut i = 0usize;
+    while i < 256 {
+        let mut crc = (i as u16) << 8;
+        let mut j = 0u8;
+        while j < 8 {
             crc = if crc & 0x8000 != 0 {
                 (crc << 1) ^ 0x1021
             } else {
                 crc << 1
             };
+            j += 1;
         }
+        table[i] = crc;
+        i += 1;
+    }
+    table
+};
+
+/// CRC-16/CCITT via table lookup (polynomial 0x1021, init 0xFFFF, no reflection).
+#[allow(
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::indexing_slicing
+)]
+pub fn crc16(data: &[u8]) -> u16 {
+    let mut crc: u16 = 0xFFFF;
+    for &byte in data {
+        // idx is always 0..=255: (u16 >> 8) ^ u16::from(u8) ≤ 0xFF, then cast to u8.
+        let idx = ((crc >> 8) ^ u16::from(byte)) as u8 as usize;
+        crc = (crc << 8) ^ CRC16_TABLE[idx];
     }
     crc
 }

@@ -7,38 +7,40 @@ use std::f64::consts::TAU;
     clippy::cast_precision_loss,      // usize → f64 for idx / total_bits
     clippy::cast_possible_truncation, // f64 → usize for silence_len / start / end
     clippy::cast_sign_loss,           // f64.round() → usize (always positive)
-    clippy::arithmetic_side_effects,  // float arithmetic; no panic risk
+    clippy::arithmetic_side_effects,  // float/int arithmetic; no panic risk
 )]
 pub fn encode_progress(framed: &[u8], on_progress: impl Fn(f32)) -> Vec<f64> {
     let spb = f64::from(SAMPLE_RATE) / f64::from(BAUD_RATE);
+    let mark_inc = TAU * MARK_FREQ / f64::from(SAMPLE_RATE);
+    let space_inc = TAU * SPACE_FREQ / f64::from(SAMPLE_RATE);
 
-    let bits: Vec<bool> = framed
-        .iter()
-        .flat_map(|&byte| (0..8u8).rev().map(move |i| (byte >> i) & 1 == 1))
-        .collect();
-
-    let total_bits = bits.len().max(1);
-    let silence_len = (f64::from(SAMPLE_RATE) * 0.05) as usize;
-    let signal_len = (bits.len() as f64 * spb).round() as usize;
+    let total_bits = framed.len() * 8;
+    let silence_len = (f64::from(SAMPLE_RATE) * 0.05).round() as usize;
+    let signal_len = (total_bits as f64 * spb).round() as usize;
     let mut samples = Vec::with_capacity(silence_len * 2 + signal_len);
 
     samples.extend(std::iter::repeat_n(0.0_f64, silence_len));
 
     let mut phase = 0.0_f64;
-    for (idx, &bit) in bits.iter().enumerate() {
-        let freq = if bit { MARK_FREQ } else { SPACE_FREQ };
-        let phase_inc = TAU * freq / f64::from(SAMPLE_RATE);
+    let mut bit_idx = 0usize;
 
-        let start = (idx as f64 * spb).round() as usize;
-        let end = ((idx + 1) as f64 * spb).round() as usize;
+    for &byte in framed {
+        for i in (0..8u8).rev() {
+            let bit = (byte >> i) & 1 == 1;
+            let phase_inc = if bit { mark_inc } else { space_inc };
 
-        for _ in start..end {
-            samples.push(AMPLITUDE * phase.sin());
-            phase = (phase + phase_inc) % TAU;
-        }
+            let start = (bit_idx as f64 * spb).round() as usize;
+            let end = ((bit_idx + 1) as f64 * spb).round() as usize;
 
-        if idx % 64 == 0 {
-            on_progress(idx as f32 / total_bits as f32);
+            for _ in start..end {
+                samples.push(AMPLITUDE * phase.sin());
+                phase = (phase + phase_inc) % TAU;
+            }
+
+            if bit_idx.is_multiple_of(64) {
+                on_progress(bit_idx as f32 / total_bits as f32);
+            }
+            bit_idx += 1;
         }
     }
 
