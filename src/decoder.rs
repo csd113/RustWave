@@ -4,17 +4,31 @@ use crate::{
 };
 use std::f64::consts::TAU;
 
+/// Precomputed sync-word bit pattern (`0x7E 0x7E`), avoiding heap allocation.
+#[allow(clippy::indexing_slicing)] // bounds are statically known: byte_idx < 2, bit_idx < 8
+const SYNC_BITS: [bool; 16] = {
+    let bytes = [0x7E_u8, 0x7E];
+    let mut bits = [false; 16];
+    let mut byte_idx = 0;
+    while byte_idx < 2 {
+        let mut bit_idx = 0;
+        while bit_idx < 8 {
+            bits[byte_idx * 8 + bit_idx] = (bytes[byte_idx] >> (7 - bit_idx)) & 1 == 1;
+            bit_idx += 1;
+        }
+        byte_idx += 1;
+    }
+    bits
+};
+
 /// Decode PCM samples back to the original filename and payload bytes.
-pub fn decode_progress(
-    samples: &[f64],
-    on_progress: impl Fn(f32) + Clone,
-) -> Result<Decoded, String> {
+pub fn decode_progress(samples: &[f64], on_progress: impl Fn(f32)) -> Result<Decoded, String> {
     let spb = f64::from(SAMPLE_RATE) / f64::from(BAUD_RATE);
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let spb_int = spb.round() as usize;
 
     for offset in 0..spb_int {
-        let bits = samples_to_bits(samples, offset, on_progress.clone());
+        let bits = samples_to_bits(samples, offset, spb, &on_progress);
         if let Ok(decoded) = find_frame_in_bits(&bits) {
             on_progress(1.0);
             return Ok(decoded);
@@ -37,16 +51,20 @@ pub fn decode(samples: &[f64]) -> Result<Decoded, String> {
     clippy::cast_precision_loss,      // usize → f64 for idx / total: acceptable at these scales
     clippy::cast_possible_truncation, // f64.round() → usize: always positive integer
     clippy::cast_sign_loss,           // f64.round() → usize: value is always ≥ 0
-    clippy::arithmetic_side_effects,  // float arithmetic cannot panic
-    clippy::indexing_slicing,         // start..end is bounds-checked by the loop guard above
+    clippy::arithmetic_side_effects,  // float/int arithmetic cannot panic at these magnitudes
+    clippy::indexing_slicing,         // start..end is bounds-checked by the loop guard
 )]
-fn samples_to_bits(samples: &[f64], offset: usize, on_progress: impl Fn(f32)) -> Vec<bool> {
-    let spb = f64::from(SAMPLE_RATE) / f64::from(BAUD_RATE);
+fn samples_to_bits(
+    samples: &[f64],
+    offset: usize,
+    spb: f64,
+    on_progress: &impl Fn(f32),
+) -> Vec<bool> {
     let total = samples.len().max(1);
-    let mut bits = Vec::new();
-    let mut idx: usize = 0;
+    let estimated = (samples.len().saturating_sub(offset)) as f64 / spb;
+    let mut bits = Vec::with_capacity(estimated as usize);
 
-    loop {
+    for idx in 0usize.. {
         let start = offset + (idx as f64 * spb).round() as usize;
         let end = offset + ((idx + 1) as f64 * spb).round() as usize;
         if end > samples.len() {
@@ -56,11 +74,9 @@ fn samples_to_bits(samples: &[f64], offset: usize, on_progress: impl Fn(f32)) ->
         let w = &samples[start..end];
         bits.push(goertzel(w, MARK_FREQ, SAMPLE_RATE) > goertzel(w, SPACE_FREQ, SAMPLE_RATE));
 
-        if idx.is_multiple_of(32) {
-            #[allow(clippy::cast_precision_loss)]
+        if idx % 32 == 0 {
             on_progress(end as f32 / total as f32);
         }
-        idx += 1;
     }
     bits
 }
@@ -79,17 +95,13 @@ fn samples_to_bits(samples: &[f64], offset: usize, on_progress: impl Fn(f32)) ->
     clippy::expect_used,             // try_into() cannot fail: Vec length is exact
 )]
 fn find_frame_in_bits(bits: &[bool]) -> Result<Decoded, String> {
-    let sync_bits: Vec<bool> = [0x7E_u8, 0x7E]
-        .iter()
-        .flat_map(|&b| (0..8u8).rev().map(move |i| (b >> i) & 1 == 1))
-        .collect();
-    let sync_len = sync_bits.len(); // 16
+    let sync_len = SYNC_BITS.len(); // 16
 
     let mut search = 0usize;
     while search + sync_len <= bits.len() {
         let Some(rel) = bits[search..]
             .windows(sync_len)
-            .position(|w| w == sync_bits.as_slice())
+            .position(|w| w == SYNC_BITS.as_slice())
         else {
             break;
         };
@@ -174,15 +186,17 @@ fn find_frame_in_bits(bits: &[bool]) -> Result<Decoded, String> {
 #[allow(clippy::arithmetic_side_effects)] // float arithmetic cannot panic
 fn goertzel(samples: &[f64], freq: f64, sample_rate: u32) -> f64 {
     let w = TAU * freq / f64::from(sample_rate);
-    let coeff = 2.0 * w.cos();
+    let cos_w = w.cos();
+    let sin_w = w.sin();
+    let coeff = 2.0 * cos_w;
     let (mut s1, mut s2) = (0.0_f64, 0.0_f64);
     for &x in samples {
-        let s0 = x.mul_add(1.0, coeff.mul_add(s1, -s2));
+        let s0 = x + coeff.mul_add(s1, -s2);
         s2 = s1;
         s1 = s0;
     }
-    let real = s2.mul_add(-w.cos(), s1);
-    let imag = s2 * w.sin();
+    let real = cos_w.mul_add(-s2, s1);
+    let imag = sin_w * s2;
     real.mul_add(real, imag * imag)
 }
 

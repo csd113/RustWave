@@ -66,6 +66,7 @@ impl AfskGui {
 
         {
             let progress = Arc::clone(&progress);
+            let thread_filename = filename.clone();
             thread::spawn(move || {
                 let prog = Arc::clone(&progress);
                 let ctx2 = ctx.clone();
@@ -88,12 +89,7 @@ impl AfskGui {
                     std::fs::read(&path)
                         .map_err(|e| e.to_string())
                         .map(|data| {
-                            let orig_name = path
-                                .file_name()
-                                .unwrap_or_default()
-                                .to_string_lossy()
-                                .into_owned();
-                            let framed = crate::framer::frame(&data, &orig_name);
+                            let framed = crate::framer::frame(&data, &thread_filename);
                             crate::encoder::encode_progress(&framed, on_progress)
                         })
                         .and_then(|samples| {
@@ -207,12 +203,12 @@ impl eframe::App for AfskGui {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_worker();
 
-        let dropped = ctx.input(|i| i.raw.dropped_files.clone());
-        if let Some(f) = dropped.first() {
-            if let Some(p) = &f.path {
-                if !matches!(self.state, State::Processing { .. }) {
-                    self.start_processing(p.clone(), ctx.clone());
-                }
+        // Extract only the path to avoid cloning the entire Vec<DroppedFile> every frame.
+        let dropped_path: Option<PathBuf> =
+            ctx.input(|i| i.raw.dropped_files.first().and_then(|f| f.path.clone()));
+        if let Some(p) = dropped_path {
+            if !matches!(self.state, State::Processing { .. }) {
+                self.start_processing(p, ctx.clone());
             }
         }
 
@@ -379,11 +375,15 @@ fn draw_result(
         color,
     );
 
+    // Truncate to last ~max_chars characters, safely respecting UTF-8 boundaries.
     let max_chars = 55usize;
-    let display = if detail.len() > max_chars {
-        format!("…{}", &detail[detail.len().saturating_sub(max_chars - 1)..])
+    let char_count = detail.chars().count();
+    let display = if char_count > max_chars {
+        let skip = char_count - (max_chars - 1);
+        let byte_offset = detail.char_indices().nth(skip).map_or(0, |(i, _)| i);
+        format!("…{}", &detail[byte_offset..])
     } else {
-        detail.to_string()
+        detail.to_owned()
     };
     painter.text(
         Pos2::new(cx, cy + 28.0),
