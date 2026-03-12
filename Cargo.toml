@@ -1,0 +1,10 @@
+[package]
+name = "afsk"
+version = "0.1.0"
+edition = "2021"
+description = "AFSK audio codec — encode bytes to WAV, decode WAV to bytes"
+
+[dependencies]
+clap    = { version = "4", features = ["derive"] }
+hound   = "3"
+eframe  = "0.27"
