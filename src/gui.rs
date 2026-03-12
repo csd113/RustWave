@@ -4,11 +4,15 @@
 //!   • WAV  → decoded, output saved with the ORIGINAL filename next to the binary
 //!   • Other → encoded to `<stem>_encoded.wav` next to the binary
 
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{mpsc, Arc};
-use std::thread;
-use std::time::Duration;
+use std::{
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicU32, Ordering},
+        mpsc, Arc,
+    },
+    thread,
+    time::Duration,
+};
 
 use eframe::egui::{self, Color32, CornerRadius, FontId, Pos2, Rect, Stroke, Vec2};
 
@@ -228,7 +232,8 @@ impl eframe::App for AfskGui {
                 let avail = ui.available_size();
                 ui.add_space(18.0);
                 ui.vertical_centered(|ui| {
-                    #[allow(clippy::arithmetic_side_effects)] // egui Vec2 addition; no panic risk
+                    #[allow(clippy::arithmetic_side_effects)]
+                    // egui Vec2 addition; no panic risk
                     ui.painter().text(
                         ui.next_widget_position() + Vec2::new(avail.x / 2.0, 0.0),
                         egui::Align2::CENTER_TOP,

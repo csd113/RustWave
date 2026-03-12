@@ -1,5 +1,7 @@
-use crate::config::{BAUD_RATE, MARK_FREQ, SAMPLE_RATE, SPACE_FREQ};
-use crate::framer::Decoded;
+use crate::{
+    config::{BAUD_RATE, MARK_FREQ, SAMPLE_RATE, SPACE_FREQ},
+    framer::Decoded,
+};
 use std::f64::consts::TAU;
 
 /// Decode PCM samples back to the original filename and payload bytes.
