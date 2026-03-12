@@ -1,0 +1,66 @@
+# cargo-deny configuration for RustWave
+# https://embarkstudios.github.io/cargo-deny/
+
+# ---------------------------------------------------------------------------
+# Advisories — known vulnerabilities & unmaintained crates
+# ---------------------------------------------------------------------------
+[advisories]
+version = 2
+yanked  = "deny"
+
+# `paste` (RUSTSEC-2024-0436) is a transitive dep of eframe (via accesskit_windows
+# and metal). It is not used by our own code.
+ignore = [
+    "RUSTSEC-2024-0436",  # paste – no longer maintained
+]
+
+# ---------------------------------------------------------------------------
+# Licenses
+# ---------------------------------------------------------------------------
+[licenses]
+version = 2
+allow   = [
+    # Common permissive licences
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "CC0-1.0",
+
+    # Weak-copyleft / other permissive
+    "MPL-2.0",
+
+    # Unicode data files
+    "Unicode-3.0",
+
+    # Boost Software Licence — permissive, used by `error-code` (transitive dep of eframe)
+    "BSL-1.0",
+
+    # Font licences — used by `epaint_default_fonts` (embedded egui fonts)
+    # OFL-1.1:         SIL Open Font Licence — allows free use/embedding in any software
+    # Ubuntu-font-1.0: Ubuntu Font Licence  — permits embedding in applications
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+]
+unused-allowed-license = "allow"
+
+# ---------------------------------------------------------------------------
+# Bans — duplicate crates / disallowed crates
+# ---------------------------------------------------------------------------
+[bans]
+# All remaining duplicates are transitive deps of eframe/wgpu/winit that we
+# cannot resolve directly. Allow them globally rather than maintaining a
+# skip list that goes stale every time eframe is updated.
+multiple-versions = "allow"
+wildcards         = "allow"
+
+# ---------------------------------------------------------------------------
+# Sources — only allow crates.io
+# ---------------------------------------------------------------------------
+[sources]
+unknown-registry = "deny"
+unknown-git      = "deny"
+allow-registry   = ["https://github.com/rust-lang/crates.io-index"]
