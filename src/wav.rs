@@ -15,6 +15,8 @@ pub fn write(path: &Path, samples: &[f64]) -> Result<(), String> {
     let mut writer = WavWriter::create(path, spec).map_err(|e| e.to_string())?;
 
     for &s in samples {
+        // clamp guarantees the value is in [-32767, 32767] before truncation
+        #[allow(clippy::cast_possible_truncation)]
         let v = (s.clamp(-1.0, 1.0) * 32_767.0) as i16;
         writer.write_sample(v).map_err(|e| e.to_string())?;
     }
@@ -34,13 +36,16 @@ pub fn read(path: &Path) -> Result<Vec<f64>, String> {
             let channels = spec.channels as usize;
             reader
                 .samples::<i16>()
-                .step_by(channels) // take only the first channel
-                .map(|s| s.map(|v| v as f64 / 32_768.0).map_err(|e| e.to_string()))
+                .step_by(channels)
+                .map(|s| {
+                    s.map(|v| f64::from(v) / 32_768.0)
+                        .map_err(|e| e.to_string())
+                })
                 .collect()
         }
         (bits, fmt) => Err(format!(
             "unsupported WAV format: {bits}-bit {fmt:?}  \
-             (afsk expects 16-bit integer PCM)"
+             (rustwave-cli expects 16-bit integer PCM)"
         )),
     }
 }
@@ -59,28 +64,29 @@ mod tests {
     }
 
     #[test]
-    fn silence_round_trip() {
-        let path = tmp("afsk_wav_silence.wav");
+    fn silence_round_trip() -> Result<(), String> {
+        let path = tmp("rustwave_wav_silence.wav");
         let original = vec![0.0_f64; 4_410];
-        write(&path, &original).unwrap();
-        let recovered = read(&path).unwrap();
+        write(&path, &original)?;
+        let recovered = read(&path)?;
         assert_eq!(original.len(), recovered.len());
         for v in recovered {
             assert!(v.abs() < 2.0 / 32_768.0, "expected silence, got {v}");
         }
         let _ = std::fs::remove_file(&path);
+        Ok(())
     }
 
     #[test]
-    fn sine_round_trip() {
-        let path = tmp("afsk_wav_sine.wav");
-        let original: Vec<f64> = (0..44_100)
-            .map(|i| 0.5 * (TAU * 440.0 * i as f64 / 44_100.0).sin())
+    fn sine_round_trip() -> Result<(), String> {
+        let path = tmp("rustwave_wav_sine.wav");
+        #[allow(clippy::cast_precision_loss)]
+        let original: Vec<f64> = (0..44_100_i32)
+            .map(|i| 0.5 * (TAU * 440.0 * f64::from(i) / 44_100.0).sin())
             .collect();
-        write(&path, &original).unwrap();
-        let recovered = read(&path).unwrap();
+        write(&path, &original)?;
+        let recovered = read(&path)?;
         assert_eq!(original.len(), recovered.len());
-        // Max 16-bit quantisation error ≈ 1.5 × 10⁻⁵
         for (a, b) in original.iter().zip(recovered.iter()) {
             assert!(
                 (a - b).abs() < 5e-5,
@@ -88,5 +94,6 @@ mod tests {
             );
         }
         let _ = std::fs::remove_file(&path);
+        Ok(())
     }
 }

@@ -1,4 +1,4 @@
-//! GUI front-end — launched with `afsk -gui`.
+//! GUI front-end — launched with `rustwave-cli -gui`.
 //!
 //! Drag any file onto the window:
 //!   • WAV  → decoded, output saved with the ORIGINAL filename next to the binary
@@ -10,7 +10,7 @@ use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::Duration;
 
-use eframe::egui::{self, Color32, FontId, Pos2, Rect, Rounding, Stroke, Vec2};
+use eframe::egui::{self, Color32, CornerRadius, FontId, Pos2, Rect, Stroke, Vec2};
 
 // ─── State machine ───────────────────────────────────────────────────────────
 
@@ -36,15 +36,14 @@ pub struct AfskGui {
 }
 
 impl AfskGui {
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    pub const fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         Self { state: State::Idle }
     }
 
     fn start_processing(&mut self, path: PathBuf, ctx: egui::Context) {
         let is_wav = path
             .extension()
-            .map(|e| e.to_ascii_lowercase() == "wav")
-            .unwrap_or(false);
+            .is_some_and(|e| e.eq_ignore_ascii_case("wav"));
 
         let filename = path
             .file_name()
@@ -67,29 +66,24 @@ impl AfskGui {
                 let prog = Arc::clone(&progress);
                 let ctx2 = ctx.clone();
                 let on_progress = move |v: f32| {
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                     prog.store((v.clamp(0.0, 1.0) * 1_000_000.0) as u32, Ordering::Relaxed);
                     ctx2.request_repaint_after(Duration::from_millis(16));
                 };
 
                 let outcome: Result<PathBuf, String> = if is_wav {
-                    // ── Decode WAV → original file ───────────────────────
                     crate::wav::read(&path)
-                        .and_then(|samples| {
-                            crate::decoder::decode_progress(&samples, on_progress).map_err(|e| e)
-                        })
+                        .and_then(|samples| crate::decoder::decode_progress(&samples, on_progress))
                         .and_then(|decoded| {
-                            // Use the filename baked into the signal
                             let out = binary_dir.join(&decoded.filename);
                             std::fs::write(&out, &decoded.data)
-                                .map(|_| out)
+                                .map(|()| out)
                                 .map_err(|e| e.to_string())
                         })
                 } else {
-                    // ── Encode file → WAV ────────────────────────────────
                     std::fs::read(&path)
                         .map_err(|e| e.to_string())
                         .map(|data| {
-                            // Store the original filename in the frame header
                             let orig_name = path
                                 .file_name()
                                 .unwrap_or_default()
@@ -101,7 +95,7 @@ impl AfskGui {
                         .and_then(|samples| {
                             let stem = path.file_stem().unwrap_or_default().to_string_lossy();
                             let out = binary_dir.join(format!("{stem}_encoded.wav"));
-                            crate::wav::write(&out, &samples).map(|_| out)
+                            crate::wav::write(&out, &samples).map(|()| out)
                         })
                 };
 
@@ -118,19 +112,12 @@ impl AfskGui {
             rx,
         };
     }
-}
 
-// ─── eframe::App ─────────────────────────────────────────────────────────────
-
-impl eframe::App for AfskGui {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Poll worker result
+    /// Poll the worker channel and advance state if the worker has finished.
+    fn poll_worker(&mut self) {
         let finished: Option<(&'static str, Result<PathBuf, String>)> =
             if let State::Processing { rx, action, .. } = &self.state {
-                match rx.try_recv() {
-                    Ok(result) => Some((action, result)),
-                    Err(_) => None,
-                }
+                rx.try_recv().ok().map(|result| (*action, result))
             } else {
                 None
             };
@@ -141,8 +128,81 @@ impl eframe::App for AfskGui {
                 Err(e) => State::Failed(e),
             };
         }
+    }
 
-        // Accept dropped files
+    /// Draw the drop zone and its current contents.
+    fn draw_zone(
+        &self,
+        ui: &mut egui::Ui,
+        zone_size: Vec2,
+        hovering: bool,
+        accent: Color32,
+        bg_panel: Color32,
+        dim_text: Color32,
+    ) {
+        ui.vertical_centered(|ui| {
+            let (rect, _) = ui.allocate_exact_size(zone_size, egui::Sense::hover());
+
+            let fill = if hovering {
+                Color32::from_rgba_premultiplied(100, 145, 235, 15)
+            } else {
+                bg_panel
+            };
+            let border = if hovering {
+                accent
+            } else {
+                Color32::from_rgb(50, 55, 75)
+            };
+
+            ui.painter().rect_filled(rect, CornerRadius::same(10), fill);
+            dashed_border(ui.painter(), rect, Stroke::new(1.5, border));
+
+            match &self.state {
+                State::Idle => draw_idle(ui.painter(), rect, hovering, accent, dim_text),
+                State::Processing {
+                    filename,
+                    action,
+                    progress,
+                    ..
+                } => {
+                    #[allow(clippy::cast_precision_loss)]
+                    // u32 progress value; precision loss is fine
+                    let v = progress.load(Ordering::Relaxed) as f32 / 1_000_000.0;
+                    draw_processing(ui.painter(), rect, action, filename, v, accent, dim_text);
+                }
+                State::Done { action, output } => {
+                    draw_result(
+                        ui.painter(),
+                        rect,
+                        true,
+                        &format!("{action} complete"),
+                        &output.to_string_lossy(),
+                        accent,
+                        dim_text,
+                    );
+                }
+                State::Failed(err) => {
+                    draw_result(
+                        ui.painter(),
+                        rect,
+                        false,
+                        "Error",
+                        err,
+                        Color32::from_rgb(220, 85, 85),
+                        dim_text,
+                    );
+                }
+            }
+        });
+    }
+}
+
+// ─── eframe::App ─────────────────────────────────────────────────────────────
+
+impl eframe::App for AfskGui {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_worker();
+
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
         if let Some(f) = dropped.first() {
             if let Some(p) = &f.path {
@@ -157,23 +217,22 @@ impl eframe::App for AfskGui {
         }
 
         let hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
-
         let bg_dark = Color32::from_rgb(15, 15, 20);
         let bg_panel = Color32::from_rgb(22, 22, 30);
         let accent = Color32::from_rgb(100, 145, 235);
         let dim_text = Color32::from_rgb(100, 105, 130);
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::none().fill(bg_dark))
+            .frame(egui::Frame::NONE.fill(bg_dark))
             .show(ctx, |ui| {
                 let avail = ui.available_size();
-
                 ui.add_space(18.0);
                 ui.vertical_centered(|ui| {
+                    #[allow(clippy::arithmetic_side_effects)] // egui Vec2 addition; no panic risk
                     ui.painter().text(
                         ui.next_widget_position() + Vec2::new(avail.x / 2.0, 0.0),
                         egui::Align2::CENTER_TOP,
-                        "AFSK Codec",
+                        "RustWave",
                         FontId::proportional(20.0),
                         Color32::from_rgb(170, 175, 200),
                     );
@@ -181,70 +240,7 @@ impl eframe::App for AfskGui {
                 });
 
                 let zone_size = Vec2::new((avail.x - 40.0).max(240.0), (avail.y - 90.0).max(160.0));
-
-                ui.vertical_centered(|ui| {
-                    let (rect, _) = ui.allocate_exact_size(zone_size, egui::Sense::hover());
-
-                    let fill = if hovering {
-                        Color32::from_rgba_premultiplied(100, 145, 235, 15)
-                    } else {
-                        bg_panel
-                    };
-                    let border = if hovering {
-                        accent
-                    } else {
-                        Color32::from_rgb(50, 55, 75)
-                    };
-
-                    ui.painter().rect_filled(rect, Rounding::same(10.0), fill);
-                    dashed_border(ui.painter(), rect, Stroke::new(1.5, border));
-
-                    match &self.state {
-                        State::Idle => {
-                            draw_idle(ui.painter(), rect, hovering, accent, dim_text);
-                        }
-                        State::Processing {
-                            filename,
-                            action,
-                            progress,
-                            ..
-                        } => {
-                            let v = progress.load(Ordering::Relaxed) as f32 / 1_000_000.0;
-                            draw_processing(
-                                ui.painter(),
-                                rect,
-                                action,
-                                filename,
-                                v,
-                                accent,
-                                dim_text,
-                            );
-                        }
-                        State::Done { action, output } => {
-                            let label = format!("{} complete", action);
-                            draw_result(
-                                ui.painter(),
-                                rect,
-                                true,
-                                &label,
-                                &output.to_string_lossy(),
-                                accent,
-                                dim_text,
-                            );
-                        }
-                        State::Failed(err) => {
-                            draw_result(
-                                ui.painter(),
-                                rect,
-                                false,
-                                "Error",
-                                err,
-                                Color32::from_rgb(220, 85, 85),
-                                dim_text,
-                            );
-                        }
-                    }
-                });
+                self.draw_zone(ui, zone_size, hovering, accent, bg_panel, dim_text);
             });
     }
 }
@@ -266,36 +262,40 @@ fn draw_idle(painter: &egui::Painter, zone: Rect, hovering: bool, accent: Color3
         Color32::from_rgb(210, 215, 230)
     };
 
-    painter.text(
-        Pos2::new(cx, cy - 28.0),
-        egui::Align2::CENTER_CENTER,
-        heading,
-        FontId::proportional(18.0),
-        heading_color,
-    );
-    painter.text(
-        Pos2::new(cx, cy + 8.0),
-        egui::Align2::CENTER_CENTER,
-        "WAV  →  restores original file + extension",
-        FontId::proportional(12.5),
-        dim,
-    );
-    painter.text(
-        Pos2::new(cx, cy + 25.0),
-        egui::Align2::CENTER_CENTER,
-        "Other  →  encode to .wav",
-        FontId::proportional(12.5),
-        dim,
-    );
-    painter.text(
-        Pos2::new(cx, zone.max.y - 18.0),
-        egui::Align2::CENTER_CENTER,
-        "Output saved next to the binary",
-        FontId::proportional(11.0),
-        Color32::from_rgb(60, 65, 85),
-    );
+    #[allow(clippy::arithmetic_side_effects)]
+    {
+        painter.text(
+            Pos2::new(cx, cy - 28.0),
+            egui::Align2::CENTER_CENTER,
+            heading,
+            FontId::proportional(18.0),
+            heading_color,
+        );
+        painter.text(
+            Pos2::new(cx, cy + 8.0),
+            egui::Align2::CENTER_CENTER,
+            "WAV  →  restores original file + extension",
+            FontId::proportional(12.5),
+            dim,
+        );
+        painter.text(
+            Pos2::new(cx, cy + 25.0),
+            egui::Align2::CENTER_CENTER,
+            "Other  →  encode to .wav",
+            FontId::proportional(12.5),
+            dim,
+        );
+        painter.text(
+            Pos2::new(cx, zone.max.y - 18.0),
+            egui::Align2::CENTER_CENTER,
+            "Output saved next to the binary",
+            FontId::proportional(11.0),
+            Color32::from_rgb(60, 65, 85),
+        );
+    }
 }
 
+#[allow(clippy::arithmetic_side_effects)]
 fn draw_processing(
     painter: &egui::Painter,
     zone: Rect,
@@ -325,12 +325,16 @@ fn draw_processing(
 
     let bar_w = (zone.width() - 70.0).max(80.0);
     let bar_rect = Rect::from_center_size(Pos2::new(cx, cy + 8.0), Vec2::new(bar_w, 10.0));
-    painter.rect_filled(bar_rect, Rounding::same(5.0), Color32::from_rgb(35, 37, 52));
+    painter.rect_filled(
+        bar_rect,
+        CornerRadius::same(5),
+        Color32::from_rgb(35, 37, 52),
+    );
 
     let filled_w = (bar_rect.width() * progress.clamp(0.0, 1.0)).max(0.0);
     if filled_w >= 1.0 {
         let filled = Rect::from_min_size(bar_rect.min, Vec2::new(filled_w, bar_rect.height()));
-        painter.rect_filled(filled, Rounding::same(5.0), accent);
+        painter.rect_filled(filled, CornerRadius::same(5), accent);
     }
 
     painter.text(
@@ -342,6 +346,7 @@ fn draw_processing(
     );
 }
 
+#[allow(clippy::arithmetic_side_effects)]
 fn draw_result(
     painter: &egui::Painter,
     zone: Rect,
@@ -392,9 +397,16 @@ fn draw_result(
     );
 }
 
+#[allow(
+    clippy::arithmetic_side_effects,  // float/Vec2 arithmetic in egui types; no panic risk
+    clippy::cast_possible_truncation, // f32.ceil() → usize: always positive
+    clippy::cast_sign_loss,           // f32.ceil() → usize: always positive
+    clippy::cast_precision_loss,      // usize i → f32: acceptable for pixel coordinates
+)]
 fn dashed_border(painter: &egui::Painter, rect: Rect, stroke: Stroke) {
     let dash = 8.0_f32;
     let gap = 5.0_f32;
+    let step = dash + gap;
     let r = 10.0_f32;
 
     let seg = |from: Pos2, to: Pos2| {
@@ -404,12 +416,12 @@ fn dashed_border(painter: &egui::Painter, rect: Rect, stroke: Stroke) {
             return;
         }
         let dir = delta / len;
-        let mut t = 0.0_f32;
-        while t < len {
+        let steps = (len / step).ceil() as usize;
+        for i in 0..steps {
+            let t = i as f32 * step;
             let a = from + dir * t;
             let b = from + dir * (t + dash).min(len);
             painter.line_segment([a, b], stroke);
-            t += dash + gap;
         }
     };
 
@@ -438,14 +450,14 @@ pub fn run() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([480.0, 340.0])
             .with_min_inner_size([360.0, 260.0])
-            .with_title("AFSK Codec")
+            .with_title("RustWave")
             .with_drag_and_drop(true),
         ..Default::default()
     };
 
     eframe::run_native(
-        "AFSK Codec",
+        "RustWave",
         options,
-        Box::new(|cc| Box::new(AfskGui::new(cc)) as Box<dyn eframe::App>),
+        Box::new(|cc| Ok(Box::new(AfskGui::new(cc)) as Box<dyn eframe::App>)),
     )
 }

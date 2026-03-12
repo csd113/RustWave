@@ -1,4 +1,4 @@
-use crate::config::*;
+use crate::config::{BAUD_RATE, MARK_FREQ, SAMPLE_RATE, SPACE_FREQ};
 use crate::framer::Decoded;
 use std::f64::consts::TAU;
 
@@ -7,7 +7,8 @@ pub fn decode_progress(
     samples: &[f64],
     on_progress: impl Fn(f32) + Clone,
 ) -> Result<Decoded, String> {
-    let spb = SAMPLE_RATE as f64 / BAUD_RATE as f64;
+    let spb = f64::from(SAMPLE_RATE) / f64::from(BAUD_RATE);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let spb_int = spb.round() as usize;
 
     for offset in 0..spb_int {
@@ -30,8 +31,15 @@ pub fn decode(samples: &[f64]) -> Result<Decoded, String> {
 // Step 1 — sample → bit stream via Goertzel
 // ---------------------------------------------------------------------------
 
+#[allow(
+    clippy::cast_precision_loss,      // usize → f64 for idx / total: acceptable at these scales
+    clippy::cast_possible_truncation, // f64.round() → usize: always positive integer
+    clippy::cast_sign_loss,           // f64.round() → usize: value is always ≥ 0
+    clippy::arithmetic_side_effects,  // float arithmetic cannot panic
+    clippy::indexing_slicing,         // start..end is bounds-checked by the loop guard above
+)]
 fn samples_to_bits(samples: &[f64], offset: usize, on_progress: impl Fn(f32)) -> Vec<bool> {
-    let spb = SAMPLE_RATE as f64 / BAUD_RATE as f64;
+    let spb = f64::from(SAMPLE_RATE) / f64::from(BAUD_RATE);
     let total = samples.len().max(1);
     let mut bits = Vec::new();
     let mut idx: usize = 0;
@@ -46,7 +54,8 @@ fn samples_to_bits(samples: &[f64], offset: usize, on_progress: impl Fn(f32)) ->
         let w = &samples[start..end];
         bits.push(goertzel(w, MARK_FREQ, SAMPLE_RATE) > goertzel(w, SPACE_FREQ, SAMPLE_RATE));
 
-        if idx % 32 == 0 {
+        if idx.is_multiple_of(32) {
+            #[allow(clippy::cast_precision_loss)]
             on_progress(end as f32 / total as f32);
         }
         idx += 1;
@@ -58,6 +67,15 @@ fn samples_to_bits(samples: &[f64], offset: usize, on_progress: impl Fn(f32)) ->
 // Step 2 — search the bit stream for the frame
 // ---------------------------------------------------------------------------
 
+// All slice indexing in this function is guarded by explicit bounds checks
+// immediately above each access, so indexing_slicing is a false positive here.
+// try_into() on a Vec produced by bits_to_bytes with an exact bit-width input
+// is guaranteed to succeed, so expect_used is also a false positive.
+#[allow(
+    clippy::arithmetic_side_effects, // integer index arithmetic; bounds checked manually
+    clippy::indexing_slicing,        // every slice is bounds-checked before access
+    clippy::expect_used,             // try_into() cannot fail: Vec length is exact
+)]
 fn find_frame_in_bits(bits: &[bool]) -> Result<Decoded, String> {
     let sync_bits: Vec<bool> = [0x7E_u8, 0x7E]
         .iter()
@@ -77,17 +95,16 @@ fn find_frame_in_bits(bits: &[bool]) -> Result<Decoded, String> {
         let sync_start = search + rel;
         let mut cursor = sync_start + sync_len;
 
-        // ── name_len (u16 LE) ──────────────────────────────────────────
+        // ── name_len (u16 LE) ─────────────────────────────────────────
         if cursor + 16 > bits.len() {
             break;
         }
         let name_len = {
             let b = bits_to_bytes(&bits[cursor..cursor + 16]);
-            u16::from_le_bytes(b.try_into().unwrap()) as usize
+            u16::from_le_bytes(b.try_into().expect("bits_to_bytes(16 bits) = 2 bytes")) as usize
         };
         cursor += 16;
 
-        // Sanity: filenames shouldn't exceed 255 bytes
         if name_len > 255 {
             search = sync_start + 1;
             continue;
@@ -109,7 +126,7 @@ fn find_frame_in_bits(bits: &[bool]) -> Result<Decoded, String> {
         }
         let payload_len = {
             let b = bits_to_bytes(&bits[cursor..cursor + 32]);
-            u32::from_le_bytes(b.try_into().unwrap()) as usize
+            u32::from_le_bytes(b.try_into().expect("bits_to_bytes(32 bits) = 4 bytes")) as usize
         };
         cursor += 32;
 
@@ -128,13 +145,11 @@ fn find_frame_in_bits(bits: &[bool]) -> Result<Decoded, String> {
         }
 
         // ── CRC check ─────────────────────────────────────────────────
-        // CRC covers: sync(16) + name_len(16) + name(N*8) + payload_len(32) + payload(M*8)
-        let frame_bits_end = payload_end;
-        let frame_bytes = bits_to_bytes(&bits[sync_start..frame_bits_end]);
+        let frame_bytes = bits_to_bytes(&bits[sync_start..payload_end]);
         let computed = crate::framer::crc16(&frame_bytes);
         let stored = {
             let b = bits_to_bytes(&bits[payload_end..crc_end]);
-            u16::from_le_bytes(b.try_into().unwrap())
+            u16::from_le_bytes(b.try_into().expect("bits_to_bytes(16 bits) = 2 bytes"))
         };
 
         if stored == computed {
@@ -154,25 +169,27 @@ fn find_frame_in_bits(bits: &[bool]) -> Result<Decoded, String> {
 // Non-integer Goertzel DFT
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::arithmetic_side_effects)] // float arithmetic cannot panic
 fn goertzel(samples: &[f64], freq: f64, sample_rate: u32) -> f64 {
-    let w = TAU * freq / sample_rate as f64;
+    let w = TAU * freq / f64::from(sample_rate);
     let coeff = 2.0 * w.cos();
     let (mut s1, mut s2) = (0.0_f64, 0.0_f64);
     for &x in samples {
-        let s0 = x + coeff * s1 - s2;
+        let s0 = x.mul_add(1.0, coeff.mul_add(s1, -s2));
         s2 = s1;
         s1 = s0;
     }
-    let real = s1 - s2 * w.cos();
+    let real = s2.mul_add(-w.cos(), s1);
     let imag = s2 * w.sin();
-    real * real + imag * imag
+    real.mul_add(real, imag * imag)
 }
 
 // ---------------------------------------------------------------------------
 // Bit / byte helpers
 // ---------------------------------------------------------------------------
 
-pub(crate) fn bits_to_bytes(bits: &[bool]) -> Vec<u8> {
+#[allow(clippy::arithmetic_side_effects)] // i is always 0..=7 from enumerate() on chunks(8)
+pub fn bits_to_bytes(bits: &[bool]) -> Vec<u8> {
     bits.chunks(8)
         .map(|chunk| {
             chunk
@@ -193,13 +210,19 @@ mod tests {
     use crate::{encoder, framer};
 
     #[test]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss,
+        clippy::arithmetic_side_effects
+    )]
     fn goertzel_discriminates_mark_vs_space() {
-        let spb = (SAMPLE_RATE as f64 / BAUD_RATE as f64).round() as usize;
+        let spb = (f64::from(SAMPLE_RATE) / f64::from(BAUD_RATE)).round() as usize;
         let mark_samples: Vec<f64> = (0..spb)
-            .map(|i| (TAU * MARK_FREQ * i as f64 / SAMPLE_RATE as f64).sin())
+            .map(|i| (TAU * MARK_FREQ * i as f64 / f64::from(SAMPLE_RATE)).sin())
             .collect();
         let space_samples: Vec<f64> = (0..spb)
-            .map(|i| (TAU * SPACE_FREQ * i as f64 / SAMPLE_RATE as f64).sin())
+            .map(|i| (TAU * SPACE_FREQ * i as f64 / f64::from(SAMPLE_RATE)).sin())
             .collect();
 
         assert!(
@@ -213,35 +236,39 @@ mod tests {
     }
 
     #[test]
-    fn full_round_trip_text() {
+    fn full_round_trip_text() -> Result<(), String> {
         let payload = b"Hello, AFSK!";
         let samples = encoder::encode(&framer::frame(payload, "hello.txt"));
-        let decoded = decode(&samples).expect("decode failed");
+        let decoded = decode(&samples)?;
         assert_eq!(decoded.data, payload);
         assert_eq!(decoded.filename, "hello.txt");
+        Ok(())
     }
 
     #[test]
-    fn full_round_trip_all_bytes() {
+    fn full_round_trip_all_bytes() -> Result<(), String> {
         let payload: Vec<u8> = (0u8..=255).collect();
         let samples = encoder::encode(&framer::frame(&payload, "all.bin"));
-        let decoded = decode(&samples).expect("decode failed");
+        let decoded = decode(&samples)?;
         assert_eq!(decoded.data, payload);
         assert_eq!(decoded.filename, "all.bin");
+        Ok(())
     }
 
     #[test]
-    fn full_round_trip_empty() {
+    fn full_round_trip_empty() -> Result<(), String> {
         let samples = encoder::encode(&framer::frame(&[], "empty.bin"));
-        let decoded = decode(&samples).expect("decode failed");
+        let decoded = decode(&samples)?;
         assert!(decoded.data.is_empty());
+        Ok(())
     }
 
     #[test]
-    fn filename_with_dots_preserved() {
+    fn filename_with_dots_preserved() -> Result<(), String> {
         let payload = b"compressed archive";
         let samples = encoder::encode(&framer::frame(payload, "archive.tar.gz"));
-        let decoded = decode(&samples).expect("decode failed");
+        let decoded = decode(&samples)?;
         assert_eq!(decoded.filename, "archive.tar.gz");
+        Ok(())
     }
 }

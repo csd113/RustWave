@@ -1,10 +1,15 @@
 [package]
-name = "afsk"
+name = "rustwave"
 version = "0.1.0"
 edition = "2021"
-description = "AFSK audio codec — encode bytes to WAV, decode WAV to bytes"
+license = "MIT"
+description = "RustWave audio codec — encode bytes to WAV, decode WAV to bytes"
+
+[[bin]]
+name = "rustwave-cli"
+path = "src/main.rs"
 
 [dependencies]
 clap    = { version = "4", features = ["derive"] }
 hound   = "3"
-eframe  = "0.27"
+eframe  = "0.31"

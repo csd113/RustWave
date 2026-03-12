@@ -9,7 +9,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "afsk", version, about = "AFSK audio codec", long_about = None)]
+#[command(name = "rustwave-cli", version, about = "RustWave audio codec", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -53,7 +53,6 @@ fn main() {
                 std::process::exit(1);
             });
 
-            // Store just the filename (not full path) in the frame
             let filename = input
                 .file_name()
                 .unwrap_or_default()
@@ -68,7 +67,8 @@ fn main() {
                 std::process::exit(1);
             }
 
-            let duration = samples.len() as f64 / config::SAMPLE_RATE as f64;
+            #[allow(clippy::cast_precision_loss)]
+            let duration = samples.len() as f64 / f64::from(config::SAMPLE_RATE);
             eprintln!(
                 "encoded '{}' ({} byte{}) -> {} ({:.2} s)",
                 filename,
@@ -90,7 +90,6 @@ fn main() {
                 std::process::exit(1);
             });
 
-            // Use caller-supplied path, or reconstruct from stored filename
             let out_path = output.unwrap_or_else(|| {
                 input
                     .parent()
@@ -114,7 +113,7 @@ fn main() {
     }
 }
 
-fn plural(n: usize) -> &'static str {
+const fn plural(n: usize) -> &'static str {
     if n == 1 {
         ""
     } else {
