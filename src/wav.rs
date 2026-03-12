@@ -33,7 +33,10 @@ pub fn read(path: &Path) -> Result<Vec<f64>, String> {
 
     match (spec.bits_per_sample, spec.sample_format) {
         (16, SampleFormat::Int) => {
-            let channels = spec.channels as usize;
+            let channels = usize::from(spec.channels);
+            if channels == 0 {
+                return Err("invalid WAV: 0 channels".into());
+            }
             reader
                 .samples::<i16>()
                 .step_by(channels)
@@ -59,33 +62,47 @@ mod tests {
     use super::*;
     use std::f64::consts::TAU;
 
-    fn tmp(name: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(name)
+    /// Guard that removes a temp file on drop, even if the test panics.
+    struct TempFile(std::path::PathBuf);
+
+    impl TempFile {
+        fn new(name: &str) -> Self {
+            Self(std::env::temp_dir().join(name))
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
     }
 
     #[test]
     fn silence_round_trip() -> Result<(), String> {
-        let path = tmp("rustwave_wav_silence.wav");
+        let tmp = TempFile::new("rustwave_wav_silence.wav");
         let original = vec![0.0_f64; 4_410];
-        write(&path, &original)?;
-        let recovered = read(&path)?;
+        write(tmp.path(), &original)?;
+        let recovered = read(tmp.path())?;
         assert_eq!(original.len(), recovered.len());
         for v in recovered {
             assert!(v.abs() < 2.0 / 32_768.0, "expected silence, got {v}");
         }
-        let _ = std::fs::remove_file(&path);
         Ok(())
     }
 
     #[test]
     fn sine_round_trip() -> Result<(), String> {
-        let path = tmp("rustwave_wav_sine.wav");
+        let tmp = TempFile::new("rustwave_wav_sine.wav");
         #[allow(clippy::cast_precision_loss)]
         let original: Vec<f64> = (0..44_100_i32)
             .map(|i| 0.5 * (TAU * 440.0 * f64::from(i) / 44_100.0).sin())
             .collect();
-        write(&path, &original)?;
-        let recovered = read(&path)?;
+        write(tmp.path(), &original)?;
+        let recovered = read(tmp.path())?;
         assert_eq!(original.len(), recovered.len());
         for (a, b) in original.iter().zip(recovered.iter()) {
             assert!(
@@ -93,7 +110,6 @@ mod tests {
                 "quantisation error too large: {a} vs {b}"
             );
         }
-        let _ = std::fs::remove_file(&path);
         Ok(())
     }
 }
